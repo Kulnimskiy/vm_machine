@@ -1,0 +1,40 @@
+services:
+  db:
+    container_name: vm_manager.db
+    image: postgres:latest
+    ports:
+      - "15432:5432"
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: vm_manager
+    volumes:
+      - vm_manager.db.data:/var/lib/postgresql/data
+    networks:
+      default:
+        aliases:
+          - vm_manager.db.host
+
+  server:
+    build: .
+    container_name: vm_manager.server
+    restart: always
+    depends_on:
+      - db
+    volumes:
+      - .:/app
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: vm_manager
+    ports:
+      - "8020:8020"
+      - "8888:8888"
+
+volumes:
+  vm_manager.db.data: ~
+
+networks:
+    default: ~

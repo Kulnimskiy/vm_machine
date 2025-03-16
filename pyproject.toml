@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "vm-machine"
+version = "0.1.0"
+description = ""
+authors = ["Sergio <sergeish2012@yandex.ru>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+asyncpg = "^0.30.0"
+pydantic = "^2.10.6"
+bcrypt = "^4.3.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -1,3 +1,5 @@
+from typing import Optional
+
 import asyncpg
 import bcrypt
 import logging
@@ -9,15 +11,32 @@ from config import DB_CONFIG
 logging.basicConfig(level=logging.DEBUG)
 
 
-async def get_db_pool() -> asyncpg.pool.Pool:
-    """ Gets asyncpg pool to acquire db connections """
-    return await asyncpg.create_pool(
-        host=DB_CONFIG["host"],
-        port=DB_CONFIG["port"],
-        user=DB_CONFIG["user"],
-        password=DB_CONFIG["password"],
-        database=DB_CONFIG["database"]
-    )
+class DbPool:
+    db_pool: Optional[asyncpg.pool.Pool] = None
+
+    @staticmethod
+    async def create_pool():
+        pool: asyncpg.Pool = await asyncpg.create_pool(
+            host=DB_CONFIG["host"],
+            port=DB_CONFIG["port"],
+            user=DB_CONFIG["user"],
+            password=DB_CONFIG["password"],
+            database=DB_CONFIG["database"],
+            max_size=10
+        )
+        return pool
+
+    @staticmethod
+    async def get_pool() -> asyncpg.pool.Pool:
+        if not DbPool.db_pool:
+            DbPool.db_pool = await DbPool.create_pool()
+        return DbPool.db_pool
+
+    @staticmethod
+    async def terminate_pool():
+        (await DbPool.get_pool()).terminate()
+        DbPool.db_pool = None
+        logging.info("Pool terminated")
 
 
 def hash_password(password: str) -> str:
@@ -51,6 +70,7 @@ async def create_tables(pool: asyncpg.pool.Pool):
                 size INTEGER
             );
         ''')
+        logging.info("Initialized database tables")
 
 
 async def get_vm(pool: asyncpg.pool.Pool, vm: AuthenticateVM):
@@ -59,7 +79,7 @@ async def get_vm(pool: asyncpg.pool.Pool, vm: AuthenticateVM):
             'SELECT vm_id, ram, cpu, password FROM virtual_machines WHERE vm_id=$1', vm.vm_id
         )
         if verify_password(vm.password, res[3]):
-            return VM(vm_id=res[0], ram=res[1], cpu=res[2])
+            return VM(vm_id=res[0], ram=res[1], cpu=res[2], password=res[3])
         else:
             return None
 
@@ -71,13 +91,13 @@ async def get_vms(pool: asyncpg.pool.Pool):
 
 async def create_vm(pool: asyncpg.pool.Pool, vm: VM):
     vm.password = hash_password(vm.password)
-    logging.debug(f"Acquiring connection from pool {vm.password}")
+    logging.debug(f"Acquiring connection from pool {pool}")
     async with pool.acquire() as conn:
-        logging.debug("Acquiring connection from pool2")
         await conn.execute(
             'INSERT INTO virtual_machines (vm_id, ram, cpu, password) VALUES ($1, $2, $3, $4)',
             vm.vm_id, vm.ram, vm.cpu, vm.password
         )
+        logging.info(f"Created virtual machine {vm.vm_id}")
 
 
 async def get_disks(pool: asyncpg.pool.Pool):

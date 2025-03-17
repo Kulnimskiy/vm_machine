@@ -19,6 +19,13 @@ async def send_command(command):
 
 async def main():
     # Аутентификация
+    register_command = {"command": "register", "data": {"vm_id": "vm_123", "ram": "800", "cpu": "4", "password": "password"}}
+    register_command2 = {"command": "register", "data": {"vm_id": "vm_1234", "ram": "800", "cpu": "4", "password": "password"}}
+    auth_command2 = {"command": "authenticate", "data": {"vm_id": "vm_1234", "password": "password"}}
+    list_active = {"command": "list", "data": {"type": "active"}}
+    list_authenticated = {"command": "list", "data": {"type": "authenticated"}}
+    list_all = {"command": "list", "data": {"type": "all"}}
+    list_active = {"command": "list", "data": {"type": "active"}}
     auth_command = {
         "command": "auth",
         "vm_id": VM_ID,

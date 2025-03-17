@@ -1,9 +1,10 @@
 import asyncio
 import json
+import logging
 
 from pydantic import ValidationError
 
-from database import get_db_pool, create_vm, get_vm, get_vms
+from database import get_db_pool, create_vm, get_vm, get_vms, create_tables
 from schemes import VM, Request, AuthenticateVM, Response
 
 
@@ -11,14 +12,20 @@ class VMServer:
     def __init__(self, host='127.0.0.1', port=8888):
         self.host = host
         self.port = port
-        self.connection_pool = asyncio.run(get_db_pool())
+        self.connection_pool = None
         self.active_clients = {}
+        asyncio.run(self.init_db())
+
+    async def init_db(self):
+        """ Initialize the database and create necessary tables """
+        self.connection_pool = await get_db_pool()
+        await create_tables(self.connection_pool)
 
     async def start_server(self):
-        server = await asyncio.start_server(self.handle_client, self.host, self.port)
+        svr = await asyncio.start_server(self.handle_client, self.host, self.port)
         print('Server running on {self.host}:{self.port}')
-        async with server:
-            await server.serve_forever()
+        async with svr:
+            await svr.serve_forever()
 
     async def handle_client(self, reader, writer):
         addr = writer.get_extra_info('peername')
@@ -31,7 +38,6 @@ class VMServer:
                 if not data:
                     break
                 message = json.loads(data.decode())
-                request = Request(**message)
                 response = await self.process_command(message)
                 json_data = response.model_dump_json() + "\n"  # Ensure the receiver knows message boundaries
                 writer.write(json_data.encode())
@@ -66,13 +72,12 @@ class VMServer:
     async def ping(self, message) -> Response:
         return Response(status="success", message=f"PONG", data=message)
 
-    async def register(self, message) -> Response:
-        try:
-            vm = VM(**message)
-            await create_vm(self.connection_pool, vm)
-            return Response(status="success")
-        except Exception as e:
-            return Response(status="error", message=str(e))
+    async def register(self, vm: VM) -> Response:
+        await create_vm(self.connection_pool, vm)
+        return Response(status="success")
+        # except Exception as e:
+        #     logging.error(e)
+        #     return Response(status="error", message=str(e))
 
     async def authenticate(self, vm: AuthenticateVM) -> Response:
         vm = await get_vm(self.connection_pool, vm)

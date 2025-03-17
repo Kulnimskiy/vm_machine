@@ -1,9 +1,23 @@
 import asyncpg
 import bcrypt
+import logging
 
 from schemes import AuthenticateVM
 from schemes import VM
 from config import DB_CONFIG
+
+logging.basicConfig(level=logging.DEBUG)
+
+
+async def get_db_pool() -> asyncpg.pool.Pool:
+    """ Gets asyncpg pool to acquire db connections """
+    return await asyncpg.create_pool(
+        host=DB_CONFIG["host"],
+        port=DB_CONFIG["port"],
+        user=DB_CONFIG["user"],
+        password=DB_CONFIG["password"],
+        database=DB_CONFIG["database"]
+    )
 
 
 def hash_password(password: str) -> str:
@@ -16,17 +30,6 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed_password: str) -> bool:
     """Check if the given password matches the stored hash."""
     return bcrypt.checkpw(password.encode(), hashed_password.encode())
-
-
-async def get_db_pool() -> asyncpg.pool.Pool:
-    """ Gets asyncpg pool to acquire db connections """
-    return await asyncpg.create_pool(
-        host=DB_CONFIG["host"],
-        port=DB_CONFIG["port"],
-        user=DB_CONFIG["user"],
-        password=DB_CONFIG["password"],
-        database=DB_CONFIG["database"]
-    )
 
 
 async def create_tables(pool: asyncpg.pool.Pool):
@@ -50,7 +53,7 @@ async def create_tables(pool: asyncpg.pool.Pool):
         ''')
 
 
-async def get_vm(pool: asyncpg.pool.Pool, vm:AuthenticateVM):
+async def get_vm(pool: asyncpg.pool.Pool, vm: AuthenticateVM):
     async with pool.acquire() as conn:
         res = await conn.fetchrow(
             'SELECT vm_id, ram, cpu, password FROM virtual_machines WHERE vm_id=$1', vm.vm_id
@@ -68,7 +71,9 @@ async def get_vms(pool: asyncpg.pool.Pool):
 
 async def create_vm(pool: asyncpg.pool.Pool, vm: VM):
     vm.password = hash_password(vm.password)
+    logging.debug(f"Acquiring connection from pool {vm.password}")
     async with pool.acquire() as conn:
+        logging.debug("Acquiring connection from pool2")
         await conn.execute(
             'INSERT INTO virtual_machines (vm_id, ram, cpu, password) VALUES ($1, $2, $3, $4)',
             vm.vm_id, vm.ram, vm.cpu, vm.password

@@ -1,45 +1,149 @@
 import asyncio
 import json
 
-VM_ID = "vm_123"  # Уникальный идентификатор ВМ
 
+class VM:
+    def __init__(self, vm_id=None, password=None, ram=None, cpu=None, disks=None, reader=None, writer=None):
+        self.vm_id = vm_id
+        self.password = password
+        self.ram = ram
+        self.cpu = cpu
+        self.disks = disks if disks is not None else []
+        self.reader = reader
+        self.writer = writer
 
-async def send_command(command):
-    reader, writer = await asyncio.open_connection('127.0.0.1', 8888)
+    async def send_command(self, command):
+        self.writer.write(json.dumps(command).encode())
+        await self.writer.drain()
 
-    writer.write(json.dumps(command).encode())
-    await writer.drain()
+        data = await self.reader.read(1024)
+        print(f"Server response: {data.decode()}")
 
-    data = await reader.read(1024)
-    print(f"Server response: {data.decode()}")
+    async def ping(self):
+        command = {
+            "command": "ping",
+            "data": {}
+        }
+        await self.send_command(command)
 
-    writer.close()
-    await writer.wait_closed()
+    async def register(self):
+        command = {
+            "command": "register",
+            "data": {
+                "vm_id": self.vm_id,
+                "ram": self.ram,
+                "cpu": self.cpu,
+                "password": self.password,
+                "disks": self.disks
+            }
+        }
+        await self.send_command(command)
+
+    async def authenticate(self):
+        command = {
+            "command": "authenticate",
+            "data": {
+                "vm_id": self.vm_id,
+                "password": self.password
+            }
+        }
+        await self.send_command(command)
+
+    async def list(self, list_type):
+        command = {
+            "command": "list",
+            "data": {
+                "list_type": list_type
+            }
+        }
+        await self.send_command(command)
+
+    async def update(self, ram=None, cpu=None, disks=None):
+        data = {}
+        if ram is not None:
+            data["ram"] = ram
+        if cpu is not None:
+            data["cpu"] = cpu
+        if disks is not None:
+            data["disks"] = disks
+
+        command = {
+            "command": "update",
+            "data": data
+        }
+        await self.send_command(command)
+
+    async def logout(self):
+        command = {
+            "command": "logout",
+            "data": {}
+        }
+        await self.send_command(command)
 
 
 async def main():
-    # Аутентификация
-    register_command = {"command": "register", "data": {"vm_id": "vm_123", "ram": "800", "cpu": "4", "password": "password"}}
-    register_command2 = {"command": "register", "data": {"vm_id": "vm_1234", "ram": "800", "cpu": "4", "password": "password"}}
-    auth_command2 = {"command": "authenticate", "data": {"vm_id": "vm_1234", "password": "password"}}
-    list_active = {"command": "list", "data": {"type": "active"}}
-    list_authenticated = {"command": "list", "data": {"type": "authenticated"}}
-    list_all = {"command": "list", "data": {"type": "all"}}
-    list_active = {"command": "list", "data": {"type": "active"}}
-    auth_command = {
-        "command": "auth",
-        "vm_id": VM_ID,
-        "params": {
-            "ram": "8GB",
-            "cpu": "4",
-            "disks": [{"id": "disk_1", "size": "100GB"}]
-        }
-    }
-    await send_command(auth_command)
+    # Create the VM instance
+    vm = None
 
-    # Запрос списка подключенных ВМ
-    await send_command({"command": "list_connected"})
+    # Input for creating VM
+    while vm is None:
+        vm_id = input("Enter VM ID: ")
+        password = input("Enter VM password: ")
+
+        ram = int(input("Enter RAM size for VM: "))
+        cpu = int(input("Enter number of CPUs for VM: "))
+
+        disks = []
+        num_disks = int(input("Enter number of disks: "))
+        for i in range(num_disks):
+            disk_size = int(input(f"Enter size for disk {i + 1}: "))
+            disks.append({"disk_size": disk_size})
+
+        # Create VM object
+        reader, writer = await asyncio.open_connection('127.0.0.1', 8888)
+        vm = VM(vm_id, password, ram, cpu, disks, reader, writer)
+        print(f"VM created with ID {vm_id}.")
+
+    # Main loop to handle commands
+    while True:
+        try:
+            command = input(
+                "\nEnter command (register, list_active, list_authenticated, list_all, list_all_disks, update, logout, exit): ").lower()
+
+            if command == "register":
+                await vm.register()
+            elif command == "authenticate":
+                await vm.authenticate()
+            elif command == "list_active":
+                await vm.list("active_vms")
+            elif command == "list_authenticated":
+                await vm.list("authenticated_vms")
+            elif command == "list_all":
+                await vm.list("all_vms")
+            elif command == "list_all_disks":
+                await vm.list("all_disks")
+            elif command == "update":
+                new_ram = int(input("Enter new RAM size for VM: "))
+                new_cpu = int(input("Enter new number of CPUs for VM: "))
+                new_disks = []
+                num_new_disks = int(input("Enter number of updated disks: "))
+                for i in range(num_new_disks):
+                    disk_size = int(input(f"Enter new size for disk {i + 1}: "))
+                    new_disks.append({"disk_size": disk_size})
+                await vm.update(ram=new_ram, cpu=new_cpu, disks=new_disks)
+            elif command == "logout":
+                await vm.logout()
+            elif command == "exit":
+                print("Exiting...")
+                break
+            else:
+                print("Unknown command. Try again.")
+        except ConnectionResetError as e:
+            print(e, "Trying to reconnect...")
+            vm.reader, vm.writer = await asyncio.open_connection('127.0.0.1', 8888)
+
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+

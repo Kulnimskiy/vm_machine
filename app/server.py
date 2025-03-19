@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from config import SECRET_KEY
 from database import DbPool, create_vm, get_vm, get_vms, create_tables, get_disks, verify_password
-from schemes import VM, Request, AuthenticateVM, Response, ListVM, Logout, UpdateVM
+from schemes import VM, Request, AuthenticateVM, Response, ListVM, Logout, UpdateVM, Disk
 
 
 class Token:
@@ -60,7 +60,7 @@ class VMServer:
 
         while True:
             try:
-                user_message = await reader.read(1024)
+                user_message = await reader.read(4096)
                 if not user_message:
                     break
 
@@ -101,9 +101,14 @@ class VMServer:
         return Response(status="success", message="Save the vm_id for authentication", data={"auth_id": vm.vm_id})
 
     async def authenticate(self, request_data: dict) -> Response:
+        logging.info("in auth")
+        logging.info(request_data)
         auth_data = AuthenticateVM(**request_data)
+        logging.info(auth_data)
         connection_pool = await DbPool.get_pool()
+        logging.info(auth_data.password)
         vm = await get_vm(connection_pool, auth_data.vm_id)
+        logging.info(vm)
         if vm and verify_password(auth_data.password, vm.password):
             self.active_clients[auth_data.addr]["token"] = Token.generate_token(vm.vm_id)
             return Response(
@@ -114,9 +119,12 @@ class VMServer:
 
     async def list(self, request_data: dict) -> Response:
         command_data = ListVM(**request_data)
-
-        if self.active_clients[command_data.addr]["token"] is None:
+        auth_token = self.active_clients[command_data.addr]["token"]
+        if auth_token is None:
             return Response(status="error", message="You have to authenticate to do this operation")
+
+        if auth_token != command_data.token:
+            return Response(status="error", message="Invalid access token")
 
         if command_data.list_type == "active_vms":
             return Response(status="success", data={"active_vms": await self.get_active()})
@@ -127,6 +135,7 @@ class VMServer:
         elif command_data.list_type == "all_vms":
             connection_pool = await DbPool.get_pool()
             vms = await get_vms(connection_pool)
+            logging.info(vms)
             return Response(status="success", data={"all_vms": [dict(vm) for vm in vms]})
 
         elif command_data.list_type == "all_disks":
@@ -138,12 +147,14 @@ class VMServer:
 
     async def update(self, request_data: dict) -> Response:
         command_data = UpdateVM(**request_data)
-        command_data.model_dump(exclude_none=True)
+
         auth_token = self.active_clients[command_data.addr]["token"]
         if auth_token is None:
             return Response(status="error", message="You have to authenticate to do this operation")
+        if auth_token != command_data.token:
+            return Response(status="error", message="Invalid access token")
 
-        update_fields = command_data.model_dump(exclude_none=True)
+        update_fields = command_data.model_dump(exclude_none=True, exclude={'addr', 'token', 'disks'})
         token_payload = Token.decode_token(auth_token)
         vm_id = token_payload["vm_id"]
 
@@ -155,18 +166,31 @@ class VMServer:
         values = list(update_fields.values()) + [vm_id]
 
         query = f"UPDATE virtual_machines SET {set_clause} WHERE vm_id=${len(values)}"
+        delete_old_disks_query = f"DELETE FROM disks WHERE vm_id=$1"
+        create_new_disk_query = f"INSERT INTO disks (vm_id, disk_size) VALUES ($1, $2)"
 
         async with (await DbPool.get_pool()).acquire() as conn:
             try:
-                await conn.execute(query, *values)
+                async with conn.transaction():
+                    await conn.execute(query, *values)
+                    await conn.execute(delete_old_disks_query, vm_id)
+                    for disk in command_data.disks:
+                        logging.info(disk)
+                        await conn.execute(create_new_disk_query, vm_id, disk.disk_size)
                 return Response(status="success", message="VM updated successfully")
             except Exception as e:
                 return Response(status="error", message=str(e))
 
     async def logout(self, request_data: dict):
         command_data = Logout(**request_data)
-        if self.active_clients[command_data.addr]["token"]:
-            self.active_clients[command_data.addr]["token"] = None
+        auth_token = self.active_clients[command_data.addr]["token"]
+        if auth_token is None:
+            return Response(status="error", message="You have to authenticate to do this operation")
+
+        if auth_token != command_data.token:
+            return Response(status="error", message="Invalid access token")
+
+        self.active_clients[command_data.addr]["token"] = None
         return {"status": "success", "message": "VM logged out successfully"}
 
     async def get_active(self) -> list:
@@ -175,8 +199,9 @@ class VMServer:
         for ip, vm in self.active_clients.items():
             if vm["token"]:
                 token_payload = Token.decode_token(vm["token"])
-                vm_id = token_payload["vm_id"]
-                active_vms.append({"addr": ip, "vm_info": await get_vm(connection_pool, vm_id)})
+                vm: VM = await get_vm(connection_pool, token_payload["vm_id"])
+                vm_info = vm.model_dump(exclude_none=True, exclude='password') if vm else None
+                active_vms.append({"addr": ip, "vm_info": vm_info})
             else:
                 active_vms.append({"addr": ip})
 
@@ -188,8 +213,9 @@ class VMServer:
         for ip, vm in self.active_clients.items():
             if vm["token"]:
                 token_payload = Token.decode_token(vm["token"])
-                vm_id = token_payload["vm_id"]
-                authenticated_vms.append({"addr": ip, "vm_info": await get_vm(connection_pool, vm_id)})
+                vm: VM = await get_vm(connection_pool, token_payload["vm_id"])
+                vm_info = vm.model_dump(exclude_none=True, exclude='password') if vm else None
+                authenticated_vms.append({"addr": ip, "vm_info": vm_info})
 
         return authenticated_vms
 

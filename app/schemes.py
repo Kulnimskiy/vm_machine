@@ -14,8 +14,8 @@ class Response(BaseModel):
 
 
 class Disk(BaseModel):
-    id: Optional[int] = Field(None, min_length=3, max_length=50, description="Unique identifier for the disk")
-    vm_id: Optional[str] = Field(None, min_length=3, max_length=50, description="Unique identifier for the vm")
+    id: Optional[int] = Field(None, gt=0, description="Unique identifier for the disk")
+    vm_id: Optional[str] = Field(None, max_length=50, description="Unique identifier for the vm")
     disk_size: int = Field(..., gt=0, description="Disk size in GB (greater than 0)")
 
 
@@ -41,16 +41,19 @@ class AuthenticateVM(BaseModel):
 
 
 class ListVM(BaseModel):
+    token: str
     addr: Optional[Tuple[str, int]] = None
     list_type: Literal["active_vms", "authenticated_vms", "all_vms", "all_disks"]
 
 
 class UpdateVM(BaseModel):
+    token: str
     addr: Optional[Tuple[str, int]] = None
-    ram: Optional[int] = Field(None, gt=0, lt=1024, description="Updated RAM size in MB")
+    ram: Optional[int] = Field(None, gt=0, description="Updated RAM size in MB")
     cpu: Optional[int] = Field(None, gt=0, lt=32, description="Updated number of CPU cores")
     disks: Optional[List[Disk]] = Field(None, description="List of disks associated with the VM")
 
 
 class Logout(BaseModel):
+    token: str
     addr: Optional[Tuple[str, int]]

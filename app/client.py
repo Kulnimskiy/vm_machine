@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pprint import pprint
 
 
 class VM:
@@ -11,13 +12,21 @@ class VM:
         self.disks = disks if disks is not None else []
         self.reader = reader
         self.writer = writer
+        self.auth_token = None
 
     async def send_command(self, command):
         self.writer.write(json.dumps(command).encode())
         await self.writer.drain()
 
-        data = await self.reader.read(1024)
-        print(f"Server response: {data.decode()}")
+        data = await self.reader.read(4096)
+        try:
+            json_data = json.loads(data.decode())
+        except json.JSONDecodeError:
+            json_data = dict()
+
+        print("Server response: ")
+        pprint(json_data)
+        return json_data
 
     async def ping(self):
         command = {
@@ -47,19 +56,23 @@ class VM:
                 "password": self.password
             }
         }
-        await self.send_command(command)
+        json_data = await self.send_command(command)
+        auth_token = json_data.get('data', {}).get('token')
+        if auth_token:
+            self.auth_token = auth_token
 
     async def list(self, list_type):
         command = {
             "command": "list",
             "data": {
+                "token": self.auth_token,
                 "list_type": list_type
             }
         }
         await self.send_command(command)
 
     async def update(self, ram=None, cpu=None, disks=None):
-        data = {}
+        data = {"token": self.auth_token}
         if ram is not None:
             data["ram"] = ram
         if cpu is not None:
@@ -76,8 +89,9 @@ class VM:
     async def logout(self):
         command = {
             "command": "logout",
-            "data": {}
+            "data": {"token": self.auth_token}
         }
+        self.auth_token = None
         await self.send_command(command)
 
 
@@ -108,7 +122,7 @@ async def main():
     while True:
         try:
             command = input(
-                "\nEnter command (register, list_active, list_authenticated, list_all, list_all_disks, update, logout, exit): ").lower()
+                "\nEnter command (register, authenticate, list_active, list_authenticated, list_all, list_all_disks, update, logout, exit): \n").lower()
 
             if command == "register":
                 await vm.register()
@@ -143,7 +157,5 @@ async def main():
             vm.reader, vm.writer = await asyncio.open_connection('127.0.0.1', 8888)
 
 
-
 if __name__ == "__main__":
     asyncio.run(main())
-

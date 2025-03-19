@@ -7,5 +7,5 @@ RUN pip install --no-cache-dir poetry \
     && poetry install --no-root
 
 COPY . .
-EXPOSE 8020
+EXPOSE 8888
 ENTRYPOINT ["poetry", "run", "python", "app/server.py"]

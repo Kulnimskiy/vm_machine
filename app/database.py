@@ -72,7 +72,7 @@ async def create_tables(pool: asyncpg.pool.Pool) -> None:
         logging.info("Initialized database tables")
 
 
-async def get_vm(pool: asyncpg.pool.Pool, vm_id:str) -> VM | None:
+async def get_vm(pool: asyncpg.pool.Pool, vm_id: str) -> VM | None:
     async with pool.acquire() as conn:
         vm_db = await conn.fetchrow(
             'SELECT vm_id, ram, cpu, password FROM virtual_machines WHERE vm_id=$1', vm_id
@@ -85,30 +85,42 @@ async def get_vm(pool: asyncpg.pool.Pool, vm_id:str) -> VM | None:
             'SELECT id, disk_size FROM disks WHERE vm_id=$1', vm_id
         )
         for disk in disks:
-            disks_objects.append(Disk(id=disk['id'], disk_size=disk["disk_size"]))
+            disks_objects.append(Disk(id=disk['id'], vm_id=vm_id, disk_size=disk["disk_size"]))
 
+        logging.info(logging.info("in get_vm5"))
         return VM(
-            id=vm_db['vm_id'], ram=vm_db['ram'], cpu=vm_db['cpu'], password=vm_db['password'], disks=disks_objects
+            vm_id=vm_db['vm_id'], ram=vm_db['ram'], cpu=vm_db['cpu'], password=vm_db['password'], disks=disks_objects
         )
 
 
-async def get_vms(pool: asyncpg.pool.Pool, vm_ids:list=None) -> list[VM] | None:
+async def get_vms(pool: asyncpg.pool.Pool, vm_ids: list = None) -> list[VM] | None:
     async with pool.acquire() as conn:
         vms = []
+        logging.info("in1")
         if vm_ids:
-            vms_db = await conn.fetch('SELECT vm_id, ram, cpu FROM virtual_machines where vm_id in $1', vm_ids)
+            logging.info("in2")
+            vms_db = await conn.fetch('SELECT vm_id, ram, cpu, password FROM virtual_machines where vm_id in $1',
+                                      vm_ids)
         else:
-            vms_db = await conn.fetch('SELECT vm_id, ram, cpu FROM virtual_machines')
+            logging.info("in3")
+            vms_db = await conn.fetch('SELECT vm_id, ram, cpu, password FROM virtual_machines')
+        logging.info(vms_db)
         for vm_db in vms_db:
-            vm = VM(vm_id=vm_db['vm_id'], ram=vm_db['ram'], cpu=vm_db['cpu'])
+            logging.info(vm_db)
             disks = await conn.fetch(
-                'SELECT id, disk_size FROM disks WHERE vm_id=$1', vm.vm_id
+                'SELECT id, disk_size FROM disks WHERE vm_id=$1', vm_db['vm_id']
             )
             disks_objects = []
             for disk in disks:
-                disks_objects.append(Disk(id=disk['id'], disk_size=disk["disk_size"]))
+                logging.info(vm_db)
+                disks_objects.append(Disk(id=disk['id'], vm_id=vm_db['vm_id'], disk_size=disk["disk_size"]))
+                logging.info(Disk(id=disk['id'], vm_id=vm_db['vm_id'], disk_size=disk["disk_size"]))
 
-            vm.disks = disks_objects
+            vm = VM(
+                vm_id=vm_db['vm_id'], ram=vm_db['ram'],
+                cpu=vm_db['cpu'], password=vm_db['password'], disks=disks_objects
+            )
+            logging.info(vm)
             vms.append(vm)
 
         return vms
@@ -136,6 +148,15 @@ async def create_disk(pool: asyncpg.pool.Pool, disk: Disk):
         logging.info(f"Created disk {disk.disk_size} MB fro {disk.vm_id}")
 
 
+async def delete_vm_disks(pool: asyncpg.pool.Pool, disk: Disk):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            'DELETE FROM disks WHERE vm_id=$1',
+            disk.vm_id
+        )
+        logging.info(f"Created disk {disk.disk_size} MB fro {disk.vm_id}")
+
+
 async def get_disks(pool: asyncpg.pool.Pool):
     async with pool.acquire() as conn:
         disks = await conn.fetch(
@@ -146,4 +167,3 @@ async def get_disks(pool: asyncpg.pool.Pool):
             disks_objects.append(Disk(id=disk['id'], disk_size=disk["disk_size"], vm_id=disk['vm_id']))
 
         return disks_objects
-

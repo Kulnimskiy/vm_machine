@@ -231,7 +231,6 @@ python app/client.py
 ```
 
 ## Видео демонстрация
-
-(Ссылка на видео работы приложения)
+https://www.youtube.com/watch?v=brKDzYOtfjA
 
 

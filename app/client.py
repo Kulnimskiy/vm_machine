@@ -1,6 +1,7 @@
 import asyncio
 import json
 from pprint import pprint
+import logging
 
 
 class VM:
@@ -12,7 +13,7 @@ class VM:
         self.disks = disks if disks is not None else []
         self.reader = reader
         self.writer = writer
-        self.auth_token = None
+        self.auth_token = ''
 
     async def send_command(self, command):
         self.writer.write(json.dumps(command).encode())
@@ -24,7 +25,7 @@ class VM:
         except json.JSONDecodeError:
             json_data = dict()
 
-        print("Server response: ")
+        logging.info("Server response: ")
         pprint(json_data)
         return json_data
 
@@ -91,8 +92,8 @@ class VM:
             "command": "logout",
             "data": {"token": self.auth_token}
         }
-        self.auth_token = None
         await self.send_command(command)
+        self.auth_token = ''
 
 
 async def main():
@@ -116,13 +117,14 @@ async def main():
         # Create VM object
         reader, writer = await asyncio.open_connection('127.0.0.1', 8888)
         vm = VM(vm_id, password, ram, cpu, disks, reader, writer)
-        print(f"VM created with ID {vm_id}.")
+        logging.info(f"VM created with ID {vm_id}.")
 
     # Main loop to handle commands
     while True:
         try:
             command = input(
-                "\nEnter command (register, authenticate, list_active, list_authenticated, list_all, list_all_disks, update, logout, exit): \n").lower()
+                "\nEnter command (register, authenticate, list_active, list_authenticated, list_all, list_all_disks, update, logout, exit): \n"
+            ).lower().strip()
 
             if command == "register":
                 await vm.register()
@@ -148,12 +150,12 @@ async def main():
             elif command == "logout":
                 await vm.logout()
             elif command == "exit":
-                print("Exiting...")
+                logging.info("Exiting...")
                 break
             else:
-                print("Unknown command. Try again.")
+                logging.info("Unknown command. Try again.")
         except ConnectionResetError as e:
-            print(e, "Trying to reconnect...")
+            logging.info(e, "Trying to reconnect...")
             vm.reader, vm.writer = await asyncio.open_connection('127.0.0.1', 8888)
 
 

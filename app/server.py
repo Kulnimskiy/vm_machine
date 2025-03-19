@@ -1,37 +1,29 @@
-import jwt
-import datetime
-import asyncio
 import json
+import asyncio
 import logging
-
 from pydantic import ValidationError
 
-from config import SECRET_KEY
-from database import DbPool, create_vm, get_vm, get_vms, create_tables, get_disks, verify_password
+from utils import Token
+from database import DbPool, DatabaseManager, PasswordHandler
 from schemes import VM, Request, AuthenticateVM, Response, ListVM, Logout, UpdateVM, Disk
-
-
-class Token:
-
-    @staticmethod
-    def generate_token(vm_id):
-        payload = {
-            "vm_id": vm_id,
-            "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)  # Token expiration
-        }
-        token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
-        return token
-
-    @staticmethod
-    def decode_token(token):
-        return jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
 
 
 class VMServer:
     def __init__(self, host='127.0.0.1', port=8888):
+        """
+        Initializes the VMServer instance.
+
+        Attributes:
+            host (str): The server's IP address.
+            port (int): The server's listening port.
+            active_clients (dict): A dictionary storing connected active
+            clients and authenticated clients with tokens.
+            commands (dict): A mapping of command strings to their respective handler methods.
+        """
+
         self.host = host
         self.port = port
-        self.active_clients = {}  # Stores users with auth tokens "ip": {"token": None, "writer": Writer}
+        self.active_clients = {}
         self.commands = {
             "ping": self.ping,
             "register": self.register,
@@ -41,20 +33,31 @@ class VMServer:
             "logout": self.logout
         }
 
-    async def init_db(self):
+    async def init_db(self) -> None:
         """ Initialize the database and create necessary tables """
         connection_pool = await DbPool.create_pool()
         logging.info(f'Database connection pool: {connection_pool}')
-        await create_tables(connection_pool)
+        await DatabaseManager.create_tables(connection_pool)
 
-    async def start_server(self):
+    async def start_server(self) -> None:
+        """ Starts the server to accept commands """
         svr = await asyncio.start_server(self.handle_client, self.host, self.port)
         logging.info(f'Server running on {self.host}:{self.port}')
         async with svr:
             await svr.serve_forever()
 
+    async def send_response(self, writer, response: Response) -> None:
+        response_data = response.model_dump_json() + "\n"
+        writer.write(response_data.encode())
+        await writer.drain()
+
     async def handle_client(self, reader, writer):
-        addr = writer.get_extra_info('peername')
+        """
+        Main client handler. Stores the clients address and tokens in active
+        clients variable also listening to clients commands, The commands are accepted in the json format
+        that gets validated with pydantic schemes in the commands' logic.
+        """
+        addr: tuple[str, int] = writer.get_extra_info('peername')
         self.active_clients[addr] = {"token": None, "writer": writer}
         logging.info(f'Client connected: {addr}')
 
@@ -64,17 +67,20 @@ class VMServer:
                 if not user_message:
                     break
 
-                message_decoded = json.loads(user_message.decode())
-                request = Request(**message_decoded)
+                message_data = json.loads(user_message.decode())
+                request = Request(**message_data)
                 request.data['addr'] = addr
                 response = await self.process_command(request)
-
-                json_data = response.model_dump_json() + "\n"  # Ensure the receiver knows message boundaries
-                writer.write(json_data.encode())
-                await writer.drain()
+                await self.send_response(writer, response)
 
             except ValidationError as e:
-                return Response(status="error", message=str(e))
+                logging.error(f"User {addr}: {e}")
+                await self.send_response(writer, Response(status="error", message=str(e)))
+                continue
+
+            except Exception as e:
+                logging.error(f"User {addr}: {e}")
+                break
 
         writer.close()
         self.active_clients.pop(addr, None)
@@ -82,142 +88,174 @@ class VMServer:
         logging.info(f'Client disconnected: {addr}')
 
     async def process_command(self, request: Request) -> Response:
+        """
+        Validates and runs server commands
+        """
         try:
             command = request.command.lower()
             if command in self.commands:
                 return await self.commands[command](request.data)
 
             return Response(status="success", message="Unknown command")
+
         except Exception as e:
             return Response(status="error", message=str(e), data=request.data)
 
     async def ping(self, request_data: dict) -> Response:
+        """
+        A method for the client to check if the server is running
+        """
+        logging.info(f"User: {request_data['addr']} pings")
         return Response(status="success", message=f"PONG", data=request_data)
 
     async def register(self, request_data: dict) -> Response:
+        """
+        A method for the client to register a new vm machine. Uses VM pydantic scheme for validation
+        """
         vm = VM(**request_data)
         connection_pool = await DbPool.get_pool()
-        await create_vm(connection_pool, vm)
+        await DatabaseManager.create_vm(connection_pool, vm)
+        logging.info(f"Registered VM: {vm.model_dump(exclude={'password'})}")
+
         return Response(status="success", message="Save the vm_id for authentication", data={"auth_id": vm.vm_id})
 
     async def authenticate(self, request_data: dict) -> Response:
-        logging.info("in auth")
-        logging.info(request_data)
+        """
+        Authenticates the user and sends him a jwt token to gain access to protected commands
+        """
         auth_data = AuthenticateVM(**request_data)
-        logging.info(auth_data)
         connection_pool = await DbPool.get_pool()
-        logging.info(auth_data.password)
-        vm = await get_vm(connection_pool, auth_data.vm_id)
-        logging.info(vm)
-        if vm and verify_password(auth_data.password, vm.password):
+
+        vm = await DatabaseManager.get_vm(connection_pool, auth_data.vm_id)
+        if vm and PasswordHandler.verify_password(auth_data.password, vm.password):
             self.active_clients[auth_data.addr]["token"] = Token.generate_token(vm.vm_id)
+            logging.info(f'Authenticated user: {auth_data.addr} vm_id: {vm.vm_id}')
+
             return Response(
                 status="success", message="Authentication successful",
                 data={"token": self.active_clients[auth_data.addr]['token']}
             )
+
         return Response(status="error", message="Invalid credentials")
 
     async def list(self, request_data: dict) -> Response:
+        """
+        A protected command to display info from the server. Available only for authenticated users.
+        They can list:
+        - active users (command: active_vms)
+        - authenticated users and their virtual machine info (command: authenticated_vms)
+        - all virtual machines (command: all_vms)
+        - all disks (command: all_disks)
+        """
         command_data = ListVM(**request_data)
         auth_token = self.active_clients[command_data.addr]["token"]
         if auth_token is None:
-            return Response(status="error", message="You have to authenticate to do this operation")
+            return Response(status="error", message="You have to authenticate to run this operation")
 
         if auth_token != command_data.token:
-            return Response(status="error", message="Invalid access token")
+            return Response(
+                status="error", message="Invalid access token. Try refreshing with the 'authenticate' command"
+            )
+
+        user_vm_id = Token.get_vm_id(auth_token)
 
         if command_data.list_type == "active_vms":
-            return Response(status="success", data={"active_vms": await self.get_active()})
+            logging.info(f"VM({user_vm_id}): active_vms command")
+            active, _ = await self.get_users()
+
+            return Response(status="success", data={"active_vms": active})
 
         elif command_data.list_type == "authenticated_vms":
-            return Response(status="success", data={"authenticated_vms": await self.get_authenticated()})
+            logging.info(f"VM({user_vm_id}): authenticated_vms command")
+            _, authenticated = await self.get_users()
+
+            return Response(status="success", data={"authenticated_vms": authenticated})
 
         elif command_data.list_type == "all_vms":
+            logging.info(f"VM({user_vm_id}): all_vms command")
             connection_pool = await DbPool.get_pool()
-            vms = await get_vms(connection_pool)
-            logging.info(vms)
-            return Response(status="success", data={"all_vms": [dict(vm) for vm in vms]})
+            vms = await DatabaseManager.get_vms(connection_pool)
+
+            return Response(
+                status="success",
+                data={"all_vms": [vm.model_dump(exclude_none=True, exclude={"password"}) for vm in vms]}
+            )
 
         elif command_data.list_type == "all_disks":
+            logging.info(f"VM({user_vm_id}): all_disks command")
             connection_pool = await DbPool.get_pool()
-            discs = await get_disks(connection_pool)
-            return Response(status="success", data={"all_disks": [dict(disc) for disc in discs]})
+            discs = await DatabaseManager.get_disks(connection_pool)
+
+            return Response(status="success",
+                            data={"all_disks": [disc.model_dump(exclude_none=True) for disc in discs]})
+
         else:
-            return Response(status="success", message="Unknown list type")
+            logging.info(f"VM({user_vm_id}): unknown list command type")
+            return Response(status="error", message="Unknown list command type")
+
+    async def get_users(self) -> tuple[list, list]:
+        """
+        Returns all active users and authenticated users with their virtual machine info
+        """
+        active_vms = []
+        authenticated_vms = []
+        connection_pool = await DbPool.get_pool()
+        for addr, auth_data in self.active_clients.items():
+            token = auth_data.get("token")
+
+            if token:
+                vm: VM = await DatabaseManager.get_vm(connection_pool, Token.get_vm_id(token))
+                vm_info = vm.model_dump(exclude_none=True, exclude={'password'}) if vm else dict()
+                active_vms.append({"addr": addr, "vm_info": vm_info})
+                authenticated_vms.append({"addr": addr, "vm_info": vm_info})
+
+            else:
+                active_vms.append({"addr": addr})
+
+        return active_vms, authenticated_vms
 
     async def update(self, request_data: dict) -> Response:
+        """
+        Updates virtual machine info (ram, cpu, disks) for the authenticated user
+        """
         command_data = UpdateVM(**request_data)
 
         auth_token = self.active_clients[command_data.addr]["token"]
         if auth_token is None:
-            return Response(status="error", message="You have to authenticate to do this operation")
+            return Response(status="error", message="You have to authenticate to run this operation")
+
         if auth_token != command_data.token:
-            return Response(status="error", message="Invalid access token")
+            return Response(
+                status="error", message="Invalid access token. Try refreshing with the 'authenticate' command"
+            )
 
-        update_fields = command_data.model_dump(exclude_none=True, exclude={'addr', 'token', 'disks'})
-        token_payload = Token.decode_token(auth_token)
-        vm_id = token_payload["vm_id"]
+        vm_id = Token.get_vm_id(auth_token)
+        try:
+            connection_pool = await DbPool.get_pool()
+            await DatabaseManager.update_vm(connection_pool, vm_id, command_data)
+            logging.info(f"Updated virtual machine info for vm: {vm_id}")
+            return Response(status="success", message="VM info updated successfully")
 
-        if not update_fields:
-            return {"status": "error", "message": f"No fields to update for VM:{vm_id}"}
-
-        # Build dynamic SQL query
-        set_clause = ", ".join([f"{field}=${i + 1}" for i, field in enumerate(update_fields.keys())])
-        values = list(update_fields.values()) + [vm_id]
-
-        query = f"UPDATE virtual_machines SET {set_clause} WHERE vm_id=${len(values)}"
-        delete_old_disks_query = f"DELETE FROM disks WHERE vm_id=$1"
-        create_new_disk_query = f"INSERT INTO disks (vm_id, disk_size) VALUES ($1, $2)"
-
-        async with (await DbPool.get_pool()).acquire() as conn:
-            try:
-                async with conn.transaction():
-                    await conn.execute(query, *values)
-                    await conn.execute(delete_old_disks_query, vm_id)
-                    for disk in command_data.disks:
-                        logging.info(disk)
-                        await conn.execute(create_new_disk_query, vm_id, disk.disk_size)
-                return Response(status="success", message="VM updated successfully")
-            except Exception as e:
-                return Response(status="error", message=str(e))
+        except Exception as e:
+            logging.info(f"Error updating virtual machine info for vm: {vm_id}, {e}")
+            return Response(status="error", message=str(e))
 
     async def logout(self, request_data: dict):
         command_data = Logout(**request_data)
         auth_token = self.active_clients[command_data.addr]["token"]
         if auth_token is None:
-            return Response(status="error", message="You have to authenticate to do this operation")
+            return Response(status="error", message="You have to authenticate to run this operation")
 
         if auth_token != command_data.token:
-            return Response(status="error", message="Invalid access token")
+            return Response(
+                status="error", message="Invalid access token. Try refreshing with the 'authenticate' command"
+            )
 
+        vm_id = Token.get_vm_id(auth_token)
         self.active_clients[command_data.addr]["token"] = None
-        return {"status": "success", "message": "VM logged out successfully"}
 
-    async def get_active(self) -> list:
-        active_vms = []
-        connection_pool = await DbPool.get_pool()
-        for ip, vm in self.active_clients.items():
-            if vm["token"]:
-                token_payload = Token.decode_token(vm["token"])
-                vm: VM = await get_vm(connection_pool, token_payload["vm_id"])
-                vm_info = vm.model_dump(exclude_none=True, exclude='password') if vm else None
-                active_vms.append({"addr": ip, "vm_info": vm_info})
-            else:
-                active_vms.append({"addr": ip})
-
-        return active_vms
-
-    async def get_authenticated(self) -> list:
-        authenticated_vms = []
-        connection_pool = await DbPool.get_pool()
-        for ip, vm in self.active_clients.items():
-            if vm["token"]:
-                token_payload = Token.decode_token(vm["token"])
-                vm: VM = await get_vm(connection_pool, token_payload["vm_id"])
-                vm_info = vm.model_dump(exclude_none=True, exclude='password') if vm else None
-                authenticated_vms.append({"addr": ip, "vm_info": vm_info})
-
-        return authenticated_vms
+        logging.info(f"Logged out user: {vm_id}")
+        return Response(status="success", message=f"VM ({vm_id}) logged out successfully")
 
 
 if __name__ == "__main__":
